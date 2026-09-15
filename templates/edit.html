@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block content %}
+
+<section class="edit-form-section">
+    <h2>할일 수정</h2>
+    <form action="{{ url_for('edit_todo', todo_id=todo['id']) }}" method="post" class="edit-form">
+        <label>제목</label>
+        <input type="text" name="title" value="{{ todo['title'] }}" required>
+
+        <label>설명</label>
+        <textarea name="description" rows="3">{{ todo['description'] or '' }}</textarea>
+
+        <label>마감일</label>
+        <input type="date" name="due_date" value="{{ todo['due_date'] or '' }}">
+
+        <label>우선순위</label>
+        <select name="priority">
+            <option value="high" {{ 'selected' if todo['priority'] == 'high' else '' }}>높음</option>
+            <option value="medium" {{ 'selected' if todo['priority'] == 'medium' else '' }}>보통</option>
+            <option value="low" {{ 'selected' if todo['priority'] == 'low' else '' }}>낮음</option>
+        </select>
+
+        <div class="edit-actions">
+            <button type="submit">저장</button>
+            <a href="{{ url_for('index') }}" class="btn-cancel">취소</a>
+        </div>
+    </form>
+</section>
+
+{% endblock %}
