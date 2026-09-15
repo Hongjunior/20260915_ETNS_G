@@ -1,65 +1,85 @@
 import os
-import sqlite3
 from datetime import date
 
-from flask import Flask, flash, g, redirect, render_template, request, url_for
+from flask import Flask, flash, redirect, render_template, request, url_for
+from sqlalchemy import create_engine, text
 
 app = Flask(__name__)
 app.secret_key = "etns-todo-app-secret-key"
 
-DATABASE = "/tmp/todo.db" if os.environ.get("VERCEL") else "todo.db"
+DATABASE_URL = os.environ.get("DATABASE_URL")
 
+if DATABASE_URL:
+    if DATABASE_URL.startswith("postgres://"):
+        DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql+psycopg://", 1)
+    elif DATABASE_URL.startswith("postgresql://"):
+        DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+psycopg://", 1)
+    engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+else:
+    db_path = "/tmp/todo.db" if os.environ.get("VERCEL") else "todo.db"
+    engine = create_engine(f"sqlite:///{db_path}")
 
-def get_db():
-    if "db" not in g:
-        g.db = sqlite3.connect(DATABASE)
-        g.db.row_factory = sqlite3.Row
-    return g.db
-
-
-@app.teardown_appcontext
-def close_db(exception=None):
-    db = g.pop("db", None)
-    if db is not None:
-        db.close()
+IS_POSTGRES = engine.url.get_backend_name() == "postgresql"
 
 
 def init_db():
-    with app.app_context():
-        db = get_db()
-        db.execute(
-            """
-            CREATE TABLE IF NOT EXISTS todos (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                title TEXT NOT NULL,
-                description TEXT,
-                due_date TEXT,
-                priority TEXT NOT NULL DEFAULT 'medium',
-                is_done INTEGER NOT NULL DEFAULT 0,
-                created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+    with engine.begin() as conn:
+        if IS_POSTGRES:
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE IF NOT EXISTS todos (
+                        id SERIAL PRIMARY KEY,
+                        title TEXT NOT NULL,
+                        description TEXT,
+                        due_date TEXT,
+                        priority TEXT NOT NULL DEFAULT 'medium',
+                        is_done INTEGER NOT NULL DEFAULT 0,
+                        created_at TIMESTAMP NOT NULL DEFAULT NOW()
+                    )
+                    """
+                )
             )
-            """
-        )
-        db.commit()
+        else:
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE IF NOT EXISTS todos (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        title TEXT NOT NULL,
+                        description TEXT,
+                        due_date TEXT,
+                        priority TEXT NOT NULL DEFAULT 'medium',
+                        is_done INTEGER NOT NULL DEFAULT 0,
+                        created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+                    )
+                    """
+                )
+            )
 
 
 @app.route("/")
 def index():
-    db = get_db()
     status_filter = request.args.get("status", "all")
 
-    query = "SELECT * FROM todos"
-    params = []
+    where = ""
     if status_filter == "active":
-        query += " WHERE is_done = 0"
+        where = "WHERE is_done = 0"
     elif status_filter == "done":
-        query += " WHERE is_done = 1"
-    query += " ORDER BY is_done ASC, CASE priority WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END, due_date IS NULL, due_date ASC, id DESC"
+        where = "WHERE is_done = 1"
 
-    todos = db.execute(query, params).fetchall()
+    order = """
+        ORDER BY is_done ASC,
+                 CASE priority WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END,
+                 (due_date IS NULL), due_date ASC, id DESC
+    """
 
-    total = db.execute("SELECT COUNT(*) AS c FROM todos").fetchone()["c"]
-    done = db.execute("SELECT COUNT(*) AS c FROM todos WHERE is_done = 1").fetchone()["c"]
+    with engine.connect() as conn:
+        todos = conn.execute(text(f"SELECT * FROM todos {where} {order}")).mappings().all()
+        total = conn.execute(text("SELECT COUNT(*) AS c FROM todos")).mappings().first()["c"]
+        done = conn.execute(
+            text("SELECT COUNT(*) AS c FROM todos WHERE is_done = 1")
+        ).mappings().first()["c"]
 
     return render_template(
         "index.html",
@@ -82,33 +102,39 @@ def add_todo():
         flash("할일 제목을 입력해주세요.", "error")
         return redirect(url_for("index"))
 
-    db = get_db()
-    db.execute(
-        "INSERT INTO todos (title, description, due_date, priority) VALUES (?, ?, ?, ?)",
-        (title, description, due_date, priority),
-    )
-    db.commit()
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO todos (title, description, due_date, priority) "
+                "VALUES (:title, :description, :due_date, :priority)"
+            ),
+            {"title": title, "description": description, "due_date": due_date, "priority": priority},
+        )
     flash("할일이 추가되었습니다.", "success")
     return redirect(url_for("index"))
 
 
 @app.route("/toggle/<int:todo_id>", methods=["POST"])
 def toggle_todo(todo_id):
-    db = get_db()
-    todo = db.execute("SELECT * FROM todos WHERE id = ?", (todo_id,)).fetchone()
-    if todo:
-        db.execute(
-            "UPDATE todos SET is_done = ? WHERE id = ?",
-            (0 if todo["is_done"] else 1, todo_id),
-        )
-        db.commit()
+    with engine.begin() as conn:
+        todo = conn.execute(
+            text("SELECT is_done FROM todos WHERE id = :id"), {"id": todo_id}
+        ).mappings().first()
+        if todo:
+            conn.execute(
+                text("UPDATE todos SET is_done = :val WHERE id = :id"),
+                {"val": 0 if todo["is_done"] else 1, "id": todo_id},
+            )
     return redirect(request.referrer or url_for("index"))
 
 
 @app.route("/edit/<int:todo_id>", methods=["GET", "POST"])
 def edit_todo(todo_id):
-    db = get_db()
-    todo = db.execute("SELECT * FROM todos WHERE id = ?", (todo_id,)).fetchone()
+    with engine.connect() as conn:
+        todo = conn.execute(
+            text("SELECT * FROM todos WHERE id = :id"), {"id": todo_id}
+        ).mappings().first()
+
     if not todo:
         flash("할일을 찾을 수 없습니다.", "error")
         return redirect(url_for("index"))
@@ -123,11 +149,20 @@ def edit_todo(todo_id):
             flash("할일 제목을 입력해주세요.", "error")
             return redirect(url_for("edit_todo", todo_id=todo_id))
 
-        db.execute(
-            "UPDATE todos SET title = ?, description = ?, due_date = ?, priority = ? WHERE id = ?",
-            (title, description, due_date, priority, todo_id),
-        )
-        db.commit()
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "UPDATE todos SET title = :title, description = :description, "
+                    "due_date = :due_date, priority = :priority WHERE id = :id"
+                ),
+                {
+                    "title": title,
+                    "description": description,
+                    "due_date": due_date,
+                    "priority": priority,
+                    "id": todo_id,
+                },
+            )
         flash("할일이 수정되었습니다.", "success")
         return redirect(url_for("index"))
 
@@ -136,9 +171,8 @@ def edit_todo(todo_id):
 
 @app.route("/delete/<int:todo_id>", methods=["POST"])
 def delete_todo(todo_id):
-    db = get_db()
-    db.execute("DELETE FROM todos WHERE id = ?", (todo_id,))
-    db.commit()
+    with engine.begin() as conn:
+        conn.execute(text("DELETE FROM todos WHERE id = :id"), {"id": todo_id})
     flash("할일이 삭제되었습니다.", "success")
     return redirect(url_for("index"))
 
