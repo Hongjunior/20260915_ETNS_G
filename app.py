@@ -1,3 +1,4 @@
+import os
 import sqlite3
 from datetime import date
 
@@ -6,7 +7,7 @@ from flask import Flask, flash, g, redirect, render_template, request, url_for
 app = Flask(__name__)
 app.secret_key = "etns-todo-app-secret-key"
 
-DATABASE = "todo.db"
+DATABASE = "/tmp/todo.db" if os.environ.get("VERCEL") else "todo.db"
 
 
 def get_db():
@@ -142,6 +143,7 @@ def delete_todo(todo_id):
     return redirect(url_for("index"))
 
 
+init_db()
+
 if __name__ == "__main__":
-    init_db()
     app.run(debug=True)
